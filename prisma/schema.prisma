@@ -1,0 +1,74 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String         @id @default(uuid())
+  email             String         @unique
+  name              String?
+  avatar            String?
+  googleId          String?        @unique
+  tier              Tier           @default(FREE)
+  messagesUsedToday Int            @default(0)
+  lastMessageReset  DateTime       @default(now())
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  orders            Order[]
+  conversations     Conversation[]
+}
+
+model Order {
+  id            String      @id @default(uuid())
+  invoiceNumber String      @unique
+  userId        String
+  user          User        @relation(fields: [userId], references: [id])
+  tier          Tier
+  amount        Int
+  status        OrderStatus @default(PENDING)
+  sepayData     Json?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+model Conversation {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  characterId String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  messages    Message[]
+
+  @@unique([userId, characterId])
+}
+
+model Message {
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  role           MessageRole
+  content        String
+  imageUrl       String?
+  createdAt      DateTime     @default(now())
+}
+
+enum Tier {
+  FREE
+  PREMIUM
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  FAILED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+}
