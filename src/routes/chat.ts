@@ -1,17 +1,12 @@
 import { Router } from 'express';
 import { prisma } from '../lib/prisma';
 import {
-  authMiddleware,
   optionalAuthMiddleware,
   AuthRequest,
 } from '../middleware/auth';
-import { tierCheckMiddleware } from '../middleware/tier-check';
 import { MOCK_CHARACTERS } from '../data/mock-characters';
 import {
   MOCK_RESPONSES,
-  MOCK_IMAGE_RESPONSES,
-  IMAGE_KEYWORDS,
-  MOCK_IMAGE_URLS,
 } from '../data/mock-responses';
 import { config } from '../config';
 
@@ -21,6 +16,8 @@ const GUEST_MESSAGE_LIMIT = 4;
 
 let lastResponseIndex = -1;
 
+// ── Fallback mock (used when Flask is down) ────────────────────────────
+
 function getRandomResponse(exclude: number): { text: string; index: number } {
   let idx: number;
   do {
@@ -29,30 +26,85 @@ function getRandomResponse(exclude: number): { text: string; index: number } {
   return { text: MOCK_RESPONSES[idx], index: idx };
 }
 
-function isImageRequest(content: string): boolean {
-  const lower = content.toLowerCase();
-  return IMAGE_KEYWORDS.some((kw) => lower.includes(kw));
-}
-
 function randomDelay(): Promise<void> {
-  const ms = Math.floor(Math.random() * 2000) + 1000; // 1-3s
+  const ms = Math.floor(Math.random() * 2000) + 1000;
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// In-memory guest sessions: sessionId → { characterId → messages[] }
+// ── Call Flask chat service ────────────────────────────────────────────
+
+interface ChatServiceResponse {
+  content: string;
+  image_url: string | null;
+}
+
+async function callChatService(
+  message: string,
+  character: { id: string; name: string; personality: string },
+  userTier: string,
+): Promise<ChatServiceResponse | null> {
+  try {
+    const resp = await fetch(`${config.chatService.url}/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Service-Secret': config.chatService.secret,
+      },
+      body: JSON.stringify({
+        message,
+        character_id: character.id,
+        character_name: character.name,
+        character_personality: character.personality,
+        user_tier: userTier,
+      }),
+      signal: AbortSignal.timeout(15000), // 15s timeout
+    });
+
+    if (!resp.ok) {
+      console.error(`Chat service error: ${resp.status}`);
+      return null;
+    }
+
+    return (await resp.json()) as ChatServiceResponse;
+  } catch (err) {
+    console.error('Chat service unreachable, falling back to Node.js mock:', err);
+    return null;
+  }
+}
+
+async function generateResponse(
+  message: string,
+  character: { id: string; name: string; personality: string },
+  userTier: string,
+): Promise<{ content: string; imageUrl: string | null }> {
+  // Try Flask service first
+  const aiResp = await callChatService(message, character, userTier);
+  if (aiResp) {
+    return { content: aiResp.content, imageUrl: aiResp.image_url };
+  }
+
+  // Fallback: inline mock
+  await randomDelay();
+  const resp = getRandomResponse(lastResponseIndex);
+  lastResponseIndex = resp.index;
+  return { content: resp.text, imageUrl: null };
+}
+
+// ── Guest sessions (in-memory) ─────────────────────────────────────────
+
 const guestSessions = new Map<
   string,
   Map<string, { role: string; content: string; imageUrl?: string | null }[]>
 >();
 
 function getGuestSessionId(req: AuthRequest): string {
-  // Use a cookie-based session ID or generate from IP+UA
   const existing = req.cookies?.guestSessionId;
   if (existing) return existing;
   return `guest_${req.ip}_${Date.now()}`;
 }
 
-// Get conversation with messages — supports guest
+// ── GET messages ───────────────────────────────────────────────────────
+
 chatRouter.get(
   '/:characterId/messages',
   optionalAuthMiddleware,
@@ -66,7 +118,6 @@ chatRouter.get(
       return;
     }
 
-    // Logged-in user: use DB
     if (user) {
       let conversation = await prisma.conversation.findUnique({
         where: {
@@ -86,7 +137,7 @@ chatRouter.get(
       return;
     }
 
-    // Guest user: use in-memory
+    // Guest
     const sessionId = getGuestSessionId(req);
     const sessionChats = guestSessions.get(sessionId);
     const guestMessages = sessionChats?.get(characterId) || [];
@@ -113,7 +164,8 @@ chatRouter.get(
   },
 );
 
-// Send a message — supports guest (in-memory, limited)
+// ── POST message ───────────────────────────────────────────────────────
+
 chatRouter.post(
   '/:characterId/messages',
   optionalAuthMiddleware,
@@ -146,7 +198,6 @@ chatRouter.post(
       }
       const messages = sessionChats.get(characterId)!;
 
-      // Count user messages sent so far
       const userMessageCount = messages.filter((m) => m.role === 'USER').length;
       if (userMessageCount >= GUEST_MESSAGE_LIMIT) {
         res.status(429).json({
@@ -157,14 +208,11 @@ chatRouter.post(
         return;
       }
 
-      // Simulate AI delay
-      await randomDelay();
-
-      const resp = getRandomResponse(lastResponseIndex);
-      lastResponseIndex = resp.index;
+      // Call Flask chat service (or fallback)
+      const aiResp = await generateResponse(content.trim(), character, 'FREE');
 
       messages.push({ role: 'USER', content: content.trim() });
-      messages.push({ role: 'ASSISTANT', content: resp.text });
+      messages.push({ role: 'ASSISTANT', content: aiResp.content, imageUrl: aiResp.imageUrl });
 
       const msgIdx = messages.length;
       const userMessage = {
@@ -179,15 +227,14 @@ chatRouter.post(
         id: `guest_msg_${msgIdx - 1}`,
         conversationId: `guest_${sessionId}_${characterId}`,
         role: 'ASSISTANT' as const,
-        content: resp.text,
-        imageUrl: null,
+        content: aiResp.content,
+        imageUrl: aiResp.imageUrl,
         createdAt: new Date().toISOString(),
       };
 
-      // Set session cookie
       res.cookie('guestSessionId', sessionId, {
         httpOnly: true,
-        maxAge: 24 * 60 * 60 * 1000, // 24h
+        maxAge: 24 * 60 * 60 * 1000,
         sameSite: 'lax',
       });
 
@@ -202,11 +249,7 @@ chatRouter.post(
     }
 
     // === LOGGED-IN MODE ===
-    // Check tier limits
-    if (
-      user.tier === 'FREE' &&
-      user.messagesUsedToday >= 10
-    ) {
+    if (user.tier === 'FREE' && user.messagesUsedToday >= 10) {
       res.status(429).json({
         error: 'Bạn đã hết tin nhắn miễn phí hôm nay',
         limit: 10,
@@ -216,7 +259,6 @@ chatRouter.post(
       return;
     }
 
-    // Get or create conversation
     let conversation = await prisma.conversation.findUnique({
       where: {
         userId_characterId: { userId: user.id, characterId },
@@ -229,7 +271,6 @@ chatRouter.post(
       });
     }
 
-    // Save user message
     const userMessage = await prisma.message.create({
       data: {
         conversationId: conversation.id,
@@ -238,54 +279,28 @@ chatRouter.post(
       },
     });
 
-    // Increment daily message counter
     await prisma.user.update({
       where: { id: user.id },
       data: { messagesUsedToday: { increment: 1 } },
     });
 
-    if (config.mockAi) {
-      await randomDelay();
+    // Call Flask chat service (or fallback)
+    const aiResp = await generateResponse(content.trim(), character, user.tier);
 
-      const wantsImage = isImageRequest(content);
-      let responseContent: string;
-      let imageUrl: string | null = null;
+    const assistantMessage = await prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        role: 'ASSISTANT',
+        content: aiResp.content,
+        imageUrl: aiResp.imageUrl,
+      },
+    });
 
-      if (wantsImage && user.tier === 'PREMIUM') {
-        responseContent =
-          MOCK_IMAGE_RESPONSES[
-            Math.floor(Math.random() * MOCK_IMAGE_RESPONSES.length)
-          ];
-        imageUrl =
-          MOCK_IMAGE_URLS[Math.floor(Math.random() * MOCK_IMAGE_URLS.length)];
-      } else if (wantsImage && user.tier === 'FREE') {
-        responseContent =
-          'Tính năng tạo ảnh chỉ dành cho thành viên Premium. Nâng cấp để trải nghiệm nhé!';
-      } else {
-        const resp = getRandomResponse(lastResponseIndex);
-        responseContent = resp.text;
-        lastResponseIndex = resp.index;
-      }
-
-      const assistantMessage = await prisma.message.create({
-        data: {
-          conversationId: conversation.id,
-          role: 'ASSISTANT',
-          content: responseContent,
-          imageUrl,
-        },
-      });
-
-      res.json({
-        userMessage,
-        assistantMessage,
-        messagesUsedToday: user.messagesUsedToday + 1,
-        isGuest: false,
-      });
-      return;
-    }
-
-    // Future: forward to Flask AI service
-    res.status(501).json({ error: 'Dịch vụ AI chưa sẵn sàng' });
+    res.json({
+      userMessage,
+      assistantMessage,
+      messagesUsedToday: user.messagesUsedToday + 1,
+      isGuest: false,
+    });
   },
 );

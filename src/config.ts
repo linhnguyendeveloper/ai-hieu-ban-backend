@@ -39,4 +39,9 @@ export const config = {
 
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
   mockAi: process.env.MOCK_AI !== 'false',
+
+  chatService: {
+    url: process.env.CHAT_SERVICE_URL || 'http://localhost:5001',
+    secret: process.env.CHAT_SERVICE_SECRET || 'dev-service-secret-change-me',
+  },
 };
