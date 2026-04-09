@@ -28,18 +28,22 @@ Co 3 moi truong. Chuyen doi bang npm scripts:
 
 ### Local (mac dinh)
 
-Chay ca FE va BE tren may. FE tai `localhost:3000`, BE tai `localhost:3001`.
+Chay ca FE, BE va Chat Service tren may.
 
 ```bash
-# Terminal 1 — Backend
+# Terminal 1 — Flask Chat Service (localhost:5001)
+cd ../ai-hieu-ban-chat-service
+source venv/bin/activate && python app.py
+
+# Terminal 2 — Backend (localhost:3001)
 npm run dev:local
 
-# Terminal 2 — Frontend (trong thu muc frontend)
+# Terminal 3 — Frontend (localhost:3000)
 cd ../ai-hieu-ban-frontend
 npm run dev
 ```
 
-Mo `http://localhost:3000` de test.
+Mo `http://localhost:3000` de test. Tin nhan co `(From Python Babe)` = Flask dang xu ly.
 
 ### Dev (FE local + BE deployed)
 
@@ -111,3 +115,16 @@ src/
 | POST | `/api/v1/checkout` | JWT | Tao thanh toan SePay |
 | GET | `/api/v1/orders` | JWT | Lich su don hang |
 | POST | `/api/v1/webhooks/sepay` | - | SePay IPN webhook |
+
+## Chat Service (Flask)
+
+Chat route (`POST /api/v1/chat/:id/messages`) goi Flask chat service de tao response.
+
+```
+Frontend → Node.js (auth, limits, DB) → Flask Chat Service (AI response)
+```
+
+- Node.js gui request voi `X-Service-Secret` header
+- Neu Flask khong kha dung, tu dong fallback sang mock inline
+- Config: `CHAT_SERVICE_URL` va `CHAT_SERVICE_SECRET` trong `.env`
+- Repo: `ai-hieu-ban-chat-service`
