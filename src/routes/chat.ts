@@ -7,6 +7,7 @@ import {
 import { MOCK_CHARACTERS } from '../data/mock-characters';
 import {
   MOCK_RESPONSES,
+  IMAGE_KEYWORDS,
 } from '../data/mock-responses';
 import { config } from '../config';
 
@@ -16,7 +17,14 @@ const GUEST_MESSAGE_LIMIT = 4;
 
 let lastResponseIndex = -1;
 
-// ── Fallback mock (used when Flask is down) ────────────────────────────
+// ── Image request detection (Node.js orchestrates this) ────────────────
+
+function isImageRequest(content: string): boolean {
+  const lower = content.toLowerCase();
+  return IMAGE_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
+// ── Fallback mock (used when Flask services are down) ──────────────────
 
 function getRandomResponse(exclude: number): { text: string; index: number } {
   let idx: number;
@@ -31,17 +39,15 @@ function randomDelay(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ── Call Flask chat service ────────────────────────────────────────────
+// ── Call Flask chat service (text only) ────────────────────────────────
 
 interface ChatServiceResponse {
   content: string;
-  image_url: string | null;
 }
 
 async function callChatService(
   message: string,
   character: { id: string; name: string; personality: string },
-  userTier: string,
 ): Promise<ChatServiceResponse | null> {
   try {
     const resp = await fetch(`${config.chatService.url}/chat`, {
@@ -55,9 +61,8 @@ async function callChatService(
         character_id: character.id,
         character_name: character.name,
         character_personality: character.personality,
-        user_tier: userTier,
       }),
-      signal: AbortSignal.timeout(15000), // 15s timeout
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!resp.ok) {
@@ -67,27 +72,95 @@ async function callChatService(
 
     return (await resp.json()) as ChatServiceResponse;
   } catch (err) {
-    console.error('Chat service unreachable, falling back to Node.js mock:', err);
+    console.error('Chat service unreachable, falling back to mock:', err);
     return null;
   }
 }
 
+// ── Call Flask image service ───────────────────────────────────────────
+
+interface ImageServiceResponse {
+  image_url: string;
+  caption: string;
+  style: string;
+}
+
+async function callImageService(
+  prompt: string,
+  character: { id: string; name: string; appearance?: string },
+  style: string = 'portrait',
+): Promise<ImageServiceResponse | null> {
+  try {
+    const resp = await fetch(`${config.imageService.url}/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Service-Secret': config.imageService.secret,
+      },
+      body: JSON.stringify({
+        prompt,
+        character_id: character.id,
+        character_name: character.name,
+        character_appearance: character.appearance || '',
+        style,
+      }),
+      signal: AbortSignal.timeout(30000), // 30s — image gen is slower
+    });
+
+    if (!resp.ok) {
+      console.error(`Image service error: ${resp.status}`);
+      return null;
+    }
+
+    return (await resp.json()) as ImageServiceResponse;
+  } catch (err) {
+    console.error('Image service unreachable:', err);
+    return null;
+  }
+}
+
+// ── Orchestrate response: text + optional image ────────────────────────
+
 async function generateResponse(
   message: string,
-  character: { id: string; name: string; personality: string },
+  character: { id: string; name: string; personality: string; appearance?: string },
   userTier: string,
 ): Promise<{ content: string; imageUrl: string | null }> {
-  // Try Flask service first
-  const aiResp = await callChatService(message, character, userTier);
-  if (aiResp) {
-    return { content: aiResp.content, imageUrl: aiResp.image_url };
+  const wantsImage = isImageRequest(message);
+
+  // Get text response from chat service
+  const chatResp = await callChatService(message, character);
+  let textContent: string;
+
+  if (chatResp) {
+    textContent = chatResp.content;
+  } else {
+    // Fallback: inline mock
+    await randomDelay();
+    const resp = getRandomResponse(lastResponseIndex);
+    lastResponseIndex = resp.index;
+    textContent = resp.text;
   }
 
-  // Fallback: inline mock
-  await randomDelay();
-  const resp = getRandomResponse(lastResponseIndex);
-  lastResponseIndex = resp.index;
-  return { content: resp.text, imageUrl: null };
+  // If user wants image and is PREMIUM, call image service
+  if (wantsImage && userTier === 'PREMIUM') {
+    const imageResp = await callImageService(message, character);
+    if (imageResp) {
+      return { content: imageResp.caption, imageUrl: imageResp.image_url };
+    }
+    // Image service failed — return text only
+    return { content: textContent, imageUrl: null };
+  }
+
+  // If user wants image but is FREE, tell them to upgrade
+  if (wantsImage && userTier === 'FREE') {
+    return {
+      content: 'Tính năng tạo ảnh chỉ dành cho thành viên Premium. Nâng cấp để trải nghiệm nhé!',
+      imageUrl: null,
+    };
+  }
+
+  return { content: textContent, imageUrl: null };
 }
 
 // ── Guest sessions (in-memory) ─────────────────────────────────────────
@@ -208,7 +281,7 @@ chatRouter.post(
         return;
       }
 
-      // Call Flask chat service (or fallback)
+      // Orchestrate: chat service + image service (guests are FREE tier)
       const aiResp = await generateResponse(content.trim(), character, 'FREE');
 
       messages.push({ role: 'USER', content: content.trim() });
@@ -284,7 +357,7 @@ chatRouter.post(
       data: { messagesUsedToday: { increment: 1 } },
     });
 
-    // Call Flask chat service (or fallback)
+    // Orchestrate: chat service + image service
     const aiResp = await generateResponse(content.trim(), character, user.tier);
 
     const assistantMessage = await prisma.message.create({

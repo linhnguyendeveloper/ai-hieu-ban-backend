@@ -44,4 +44,9 @@ export const config = {
     url: process.env.CHAT_SERVICE_URL || 'http://localhost:5001',
     secret: process.env.CHAT_SERVICE_SECRET || 'dev-service-secret-change-me',
   },
+
+  imageService: {
+    url: process.env.IMAGE_SERVICE_URL || 'http://localhost:5002',
+    secret: process.env.IMAGE_SERVICE_SECRET || 'dev-service-secret-change-me',
+  },
 };
