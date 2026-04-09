@@ -1,5 +1,13 @@
 import dotenv from 'dotenv';
-dotenv.config();
+import path from 'path';
+
+// Load env files in priority order:
+// 1. .env.{NODE_ENV} (if APP_ENV or NODE_ENV set)
+// 2. .env (always loaded as fallback)
+const appEnv = process.env.APP_ENV || process.env.NODE_ENV || 'development';
+const envFile = `.env.${appEnv}`;
+dotenv.config({ path: path.resolve(process.cwd(), envFile), override: true });
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
 export const config = {
   env: process.env.NODE_ENV || 'development',

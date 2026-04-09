@@ -4,9 +4,12 @@
   "description": "Backend API cho AI Hiểu Bạn — AI chat & character platform",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "APP_ENV=development tsx watch src/index.ts",
+    "dev:local": "tsx watch src/index.ts",
+    "dev:remote": "APP_ENV=development tsx watch src/index.ts",
     "build": "npx prisma generate && tsc",
     "start": "npx prisma db push --skip-generate && node dist/index.js",
+    "start:prod": "APP_ENV=production node dist/index.js",
     "postinstall": "npx prisma generate",
     "db:push": "npx prisma db push",
     "db:migrate": "npx prisma migrate dev",
